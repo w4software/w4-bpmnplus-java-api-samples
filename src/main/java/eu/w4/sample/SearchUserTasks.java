@@ -13,9 +13,10 @@ import eu.w4.engine.client.UserFilter;
 import eu.w4.engine.client.UserFilterType;
 import eu.w4.engine.client.bpmn.w4.runtime.ActivityInstance;
 import eu.w4.engine.client.bpmn.w4.runtime.ActivityInstanceAttachment;
-import eu.w4.engine.client.bpmn.w4.runtime.ActivityInstanceFilter;
 import eu.w4.engine.client.bpmn.w4.runtime.ActivityInstanceSort;
+import eu.w4.engine.client.bpmn.w4.runtime.ActualOwnerFilter;
 import eu.w4.engine.client.bpmn.w4.runtime.DefaultActivityInstanceSortBy;
+import eu.w4.engine.client.bpmn.w4.runtime.ExcludedOwnerFilter;
 import eu.w4.engine.client.bpmn.w4.runtime.InstanceState;
 import eu.w4.engine.client.bpmn.w4.runtime.PotentialOwnerFilter;
 import eu.w4.engine.client.bpmn.w4.runtime.UserTaskInstanceFilter;
@@ -27,8 +28,8 @@ import eu.w4.engine.client.service.EngineServiceFactory;
 import eu.w4.engine.client.service.ObjectFactory;
 import eu.w4.engine.client.service.UserService;
 
-// This sample shows a simple search of the tasks provided to the admin user 
-//  in order to test this application you can adapt the login with the user you want 
+// This sample shows a simple search of the tasks provided to the admin user
+//  in order to test this application you can adapt the login with the user you want
 //      or reassign task to the admin user using the admin tool.
 public class SearchUserTasks implements SampleConstants {
 	public static void main(final String[] args) throws Exception {
@@ -51,39 +52,55 @@ public class SearchUserTasks implements SampleConstants {
 		// The object factory can be used to create new instances of API objects
 		final ObjectFactory objectFactory = engineService.getObjectFactory();
 
-		ActivityService actService = engineService.getActivityService();
-
-		// Create a filter to restrict to the user tasks
-		UserTaskInstanceFilter mainActInstFilter = objectFactory
-				.newUserTaskInstanceFilter();
-
-		// Create another filter to restrict to only active activities
-		ActivityInstanceFilter actInstFilter = objectFactory
-				.newActivityInstanceFilter();
-		actInstFilter.activityInstanceStateIs(InstanceState.ACTIVE);
-	
-		// Create another filter to focused on task of the connected user
-		PotentialOwnerFilter potentialOwnerFilter = objectFactory
-				.newPotentialOwnerFilter();
-		
-		// directly accessible task 
+		// Prepare a filter on the logged user
 		UserFilter userFilter = objectFactory.newUserFilter();
-		userFilter.setUserFilterType(UserFilterType.EFFECTIVE_SUBSTITUTE);
-		
-		// And task accessible through groups
+		userFilter.userNameLike(principal.getName());
+
+		// And another on its groups
 		GroupFilter groupFilter = objectFactory.newGroupFilter();
 		groupFilter.and(userFilter);
-		
-		// Combine both filter
+
+		// Create a filter for tasks for which the user is already the actual owner
+		ActualOwnerFilter actualOwnerFilter = objectFactory.newActualOwnerFilter();
+		actualOwnerFilter.and(userFilter);
+
+		// Create a filter to find whom the user is an effective substitute of
+		UserFilter effectiveSubstituteUserFilter = objectFactory.newUserFilter();
+		effectiveSubstituteUserFilter.and(userFilter);
+		effectiveSubstituteUserFilter.setUserFilterType(UserFilterType.EFFECTIVE_SUBSTITUTE);
+
+		// And create a filter to all tasks for which the user is a substitute of the actual owner
+		ActualOwnerFilter effectiveSubstituteActualOwnerFilter = objectFactory.newActualOwnerFilter();
+		effectiveSubstituteActualOwnerFilter.and(effectiveSubstituteUserFilter);
+
+		// Create another filter on tasks the user may potentially own
+		PotentialOwnerFilter potentialOwnerFilter = objectFactory.newPotentialOwnerFilter();
 		potentialOwnerFilter.or(userFilter, groupFilter);
-		
-		// Add to the main filter the other filters
-		mainActInstFilter.and(actInstFilter, potentialOwnerFilter);
+
+		// But exclude tasks from which the user was excluded
+		ExcludedOwnerFilter excludedOwnerFilter = objectFactory.newExcludedOwnerFilter();
+		excludedOwnerFilter.or(userFilter, groupFilter);
+
+		// Combine last two in a filter on all tasks the user could potentially own but no one actually own
+		UserTaskInstanceFilter potentialOwnerUserTaskInstanceFilter = objectFactory.newUserTaskInstanceFilter();
+		potentialOwnerUserTaskInstanceFilter.and(potentialOwnerFilter);
+		potentialOwnerUserTaskInstanceFilter.not(excludedOwnerFilter);
+		potentialOwnerUserTaskInstanceFilter.userTaskInstanceHasActualOwner(false);
+
+		// Create a global filter for active tasks for which the user
+		//  - is either an actual owner,
+		//  - is the effective substitute of the actual owner
+		//  - could potentially become the actual owner
+		UserTaskInstanceFilter mainUserTaskInstanceFilter = objectFactory.newUserTaskInstanceFilter();
+		mainUserTaskInstanceFilter.activityInstanceStateIs(InstanceState.ACTIVE);
+		mainUserTaskInstanceFilter.or(actualOwnerFilter, effectiveSubstituteActualOwnerFilter, potentialOwnerUserTaskInstanceFilter);
+
+		ActivityService actService = engineService.getActivityService();
 
 		// Check the number of user tasks
 		System.out.println(" number of activities : "
 				+ actService.getSearchActivityInstancesNumberOfResults(
-						principal, mainActInstFilter));
+						principal, mainUserTaskInstanceFilter));
 
 		// Precise data retrieved by the search
 		ActivityInstanceAttachment actInstAttachment = objectFactory
@@ -93,8 +110,7 @@ public class SearchUserTasks implements SampleConstants {
 
 		// Search the first 10 user tasks
 		List<ActivityInstanceSort> sortList = new ArrayList<ActivityInstanceSort>();
-		ActivityInstanceSort activitySortByDate = objectFactory
-				.newActivityInstanceSort();
+		ActivityInstanceSort activitySortByDate = objectFactory.newActivityInstanceSort();
 		activitySortByDate.setSortBy(DefaultActivityInstanceSortBy.ACTIVE_DATE);
 		activitySortByDate.setSortMode(SortMode.DESCENDING);
 		sortList.add(activitySortByDate);
@@ -102,7 +118,7 @@ public class SearchUserTasks implements SampleConstants {
 		Integer maximumNumberOfResults = 10;
 		List<ActivityInstance> actInstances = actService
 				.searchActivityInstances(principal, actInstAttachment,
-						mainActInstFilter, sortList, offset,
+						mainUserTaskInstanceFilter, sortList, offset,
 						maximumNumberOfResults);
 
 		// Print out these tasks
